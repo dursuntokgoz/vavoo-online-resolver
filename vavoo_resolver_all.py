@@ -23,8 +23,12 @@ MEDIAURL_UA = "MediaUrl/2"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CATALOG_FILE = os.path.join(HERE, "catalog_cache.json")
+PLAYLIST_FILE = os.path.join(HERE, "playlist.m3u")
+LOCAL_BASE = "http://127.0.0.1:%d" % PORT
+
 sig_cache = {"sig": None, "ts": 0}
 ssl_ctx = ssl.create_default_context()
+
 
 def post_json(url, payload, headers, timeout=30):
     data = json.dumps(payload).encode("utf-8")
@@ -34,6 +38,7 @@ def post_json(url, payload, headers, timeout=30):
         if r.headers.get("Content-Encoding", "").lower() == "gzip":
             raw = gzip.decompress(raw)
         return r.status, json.loads(raw.decode("utf-8", errors="replace"))
+
 
 def get_sig(force=False):
     if not force and sig_cache["sig"] and time.time() - sig_cache["ts"] < 480:
@@ -76,6 +81,7 @@ def get_sig(force=False):
             last_error = e
     raise RuntimeError("Signature error: %s" % last_error)
 
+
 def resolve_stream(channel_url):
     last_error = None
     for attempt in range(2):
@@ -103,10 +109,11 @@ def resolve_stream(channel_url):
                 last_error = e
     raise RuntimeError("Resolve error: %s" % last_error)
 
+
 def load_channels():
     with open(CATALOG_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-    rows = data.get("channels", data if isinstance(data, list) else [])
+    rows = data.get("channels", []) if isinstance(data, dict) else data
     out = {}
     for ch in rows:
         cid = str(ch.get("id", "")).strip()
@@ -115,12 +122,16 @@ def load_channels():
             out[cid] = ch
     return out
 
+
 CHANNELS = load_channels()
+
 
 def esc(v):
     return str(v or "").replace('"', "'").replace("\r", " ").replace("\n", " ")
 
-def playlist():
+
+def playlist(base=LOCAL_BASE):
+    """Kanal linkleri artik yerel sunucuya (base) gidiyor."""
     lines = ["#EXTM3U"]
     for cid, ch in CHANNELS.items():
         name = esc(ch.get("name") or cid)
@@ -128,9 +139,15 @@ def playlist():
         logo = esc(ch.get("logo") or "")
         lines.append('#EXTINF:-1 tvg-name="%s" tvg-logo="%s" group-title="%s",%s' %
                      (name, logo, group, name))
-        lines.append("https://vavoo-online-resolver.onrender.com/play/%s" %
-                     urllib.parse.quote(cid, safe=""))
+        lines.append("%s/play/%s" % (base, urllib.parse.quote(cid, safe="")))
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def write_playlist_file():
+    """Baslangicta playlist.m3u dosyasini script'in yanina yazar."""
+    with open(PLAYLIST_FILE, "wb") as f:
+        f.write(playlist())
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -140,7 +157,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
 
         if path in ("/", "/playlist.m3u"):
-            body = playlist()
+            # Istegi yapan cihazin kullandigi adresi kullan
+            # (ayni agdaki TV/telefon icin de calisir)
+            host = self.headers.get("Host") or "127.0.0.1:%d" % PORT
+            body = playlist("http://" + host)
             self.send_response(200)
             self.send_header("Content-Type", "audio/x-mpegurl; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -175,11 +195,14 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_error(404)
 
+
 if __name__ == "__main__":
+    write_playlist_file()
     print("=" * 62)
     print("VAVOO Local Resolver - ALL CHANNELS")
     print("Kanale ne catalog:", len(CHANNELS))
-    print("Playlist: http://127.0.0.1:%d/playlist.m3u" % PORT)
+    print("Playlist (URL) : %s/playlist.m3u" % LOCAL_BASE)
+    print("Playlist (file):", PLAYLIST_FILE)
     print("Mos e mbyll kete dritare.")
     print("=" * 62)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
